@@ -1,88 +1,68 @@
-const Database = require('better-sqlite3');
+const fs = require('fs');
 const path = require('path');
 
-const dbPath = path.join(__dirname, '..', 'luxx.db');
-const db = new Database(dbPath);
-
-// Abilita WAL mode e foreign keys
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-// ═══════════════════════════════════════════════════════════════
-// CREAZIONE TABELLE
-// ═══════════════════════════════════════════════════════════════
-
-db.exec(`
-    CREATE TABLE IF NOT EXISTS magazzino (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT UNIQUE NOT NULL,
-        quantita INTEGER NOT NULL DEFAULT 0,
-        prezzo_acquisto INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS cassa (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        saldo_attuale INTEGER NOT NULL DEFAULT 0,
-        fondo_inizio_settimana INTEGER NOT NULL DEFAULT 0,
-        totale_spese INTEGER NOT NULL DEFAULT 0,
-        totale_incassi INTEGER NOT NULL DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS settimana_config (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        giorno_fine INTEGER,
-        orario_fine TEXT,
-        canale_id TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS pannello_config (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        channel_id TEXT,
-        message_id TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS log_canali (
-        id INTEGER PRIMARY KEY CHECK (id = 1),
-        canale_fondocassa TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS log_operazioni (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id TEXT NOT NULL,
-        tipo TEXT NOT NULL,
-        dettaglio TEXT,
-        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-    );
-`);
-
-// Inizializza riga fissa per cassa
-const cassaInit = db.prepare('SELECT id FROM cassa WHERE id = 1').get();
-if (!cassaInit) {
-    db.prepare(`
-        INSERT INTO cassa (id, saldo_attuale, fondo_inizio_settimana, totale_spese, totale_incassi)
-        VALUES (1, 0, 0, 0, 0)
-    `).run();
+const dataDir = path.join(__dirname, '..', 'data');
+if (!fs.existsSync(dataDir)) {
+    fs.mkdirSync(dataDir, { recursive: true });
 }
 
-// Inizializza riga fissa per settimana_config
-const setInit = db.prepare('SELECT id FROM settimana_config WHERE id = 1').get();
-if (!setInit) {
-    db.prepare(`
-        INSERT INTO settimana_config (id, giorno_fine, orario_fine, canale_id)
-        VALUES (1, 0, '23:59', NULL)
-    `).run();
+const dataFilePath = path.join(dataDir, 'luxx_data.json');
+
+// Dati predefiniti
+const defaultData = {
+    magazzino: [],
+    cassa: {
+        saldo_attuale: 0,
+        fondo_inizio_settimana: 0,
+        totale_spese: 0,
+        totale_incassi: 0,
+        inizio_settimana: null
+    },
+    settimana_config: {
+        giorno_fine: 0,
+        orario_fine: '23:59',
+        canale_id: null
+    },
+    pannello_config: {
+        channel_id: null,
+        message_id: null
+    },
+    log_canali: {
+        canale_fondocassa: null
+    },
+    log_operazioni: []
+};
+
+function loadData() {
+    try {
+        if (fs.existsSync(dataFilePath)) {
+            const raw = fs.readFileSync(dataFilePath, 'utf8');
+            const parsed = JSON.parse(raw);
+            return {
+                ...defaultData,
+                ...parsed,
+                cassa: { ...defaultData.cassa, ...(parsed.cassa || {}) },
+                settimana_config: { ...defaultData.settimana_config, ...(parsed.settimana_config || {}) },
+                pannello_config: { ...defaultData.pannello_config, ...(parsed.pannello_config || {}) },
+                log_canali: { ...defaultData.log_canali, ...(parsed.log_canali || {}) },
+                magazzino: parsed.magazzino || [],
+                log_operazioni: parsed.log_operazioni || []
+            };
+        }
+    } catch (err) {
+        console.error('Errore lettura JSON, fallback default:', err);
+    }
+    return JSON.parse(JSON.stringify(defaultData));
 }
 
-// Migrazione automatica colonna categoria
-const tableCols = db.prepare("PRAGMA table_info(magazzino)").all();
-if (!tableCols.some(c => c.name === 'categoria')) {
-    db.exec("ALTER TABLE magazzino ADD COLUMN categoria TEXT DEFAULT 'Alcol'");
-}
+let store = loadData();
 
-// Migrazione automatica colonna inizio_settimana in cassa
-const cassaCols = db.prepare("PRAGMA table_info(cassa)").all();
-if (!cassaCols.some(c => c.name === 'inizio_settimana')) {
-    db.exec("ALTER TABLE cassa ADD COLUMN inizio_settimana TEXT");
+function saveData() {
+    try {
+        fs.writeFileSync(dataFilePath, JSON.stringify(store, null, 2), 'utf8');
+    } catch (err) {
+        console.error('Errore salvataggio dati:', err);
+    }
 }
 
 function getFormattedDateTime(date = new Date()) {
@@ -96,10 +76,9 @@ function getFormattedDateTime(date = new Date()) {
     }).replace(',', '');
 }
 
-// Inizializza inizio_settimana se non impostato
-const cassaCurrent = db.prepare('SELECT inizio_settimana FROM cassa WHERE id = 1').get();
-if (cassaCurrent && !cassaCurrent.inizio_settimana) {
-    db.prepare('UPDATE cassa SET inizio_settimana = ? WHERE id = 1').run(getFormattedDateTime());
+if (!store.cassa.inizio_settimana) {
+    store.cassa.inizio_settimana = getFormattedDateTime();
+    saveData();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -107,48 +86,66 @@ if (cassaCurrent && !cassaCurrent.inizio_settimana) {
 // ═══════════════════════════════════════════════════════════════
 
 function getMagazzino() {
-    return db.prepare('SELECT * FROM magazzino ORDER BY categoria ASC, nome ASC').all();
+    return [...store.magazzino].sort((a, b) => {
+        if ((a.categoria || 'Alcol') === (b.categoria || 'Alcol')) {
+            return (a.nome || '').localeCompare(b.nome || '');
+        }
+        return (a.categoria || 'Alcol').localeCompare(b.categoria || 'Alcol');
+    });
 }
 
 function getItem(nome) {
-    return db.prepare('SELECT * FROM magazzino WHERE LOWER(nome) = LOWER(?)').get(nome);
+    if (!nome) return null;
+    return store.magazzino.find(i => i.nome.toLowerCase() === nome.toLowerCase()) || null;
 }
 
 function setItem(nome, prezzo_acquisto, quantita = null, categoria = 'Alcol') {
     const existing = getItem(nome);
     if (existing) {
+        existing.prezzo_acquisto = prezzo_acquisto;
+        existing.categoria = categoria;
         if (quantita !== null && quantita !== undefined) {
-            db.prepare('UPDATE magazzino SET prezzo_acquisto = ?, quantita = ?, categoria = ? WHERE id = ?')
-                .run(prezzo_acquisto, quantita, categoria, existing.id);
-        } else {
-            db.prepare('UPDATE magazzino SET prezzo_acquisto = ?, categoria = ? WHERE id = ?')
-                .run(prezzo_acquisto, categoria, existing.id);
+            existing.quantita = quantita;
         }
-        return { created: false, item: getItem(nome) };
+        saveData();
+        return { created: false, item: existing };
     } else {
-        const qta = (quantita !== null && quantita !== undefined) ? quantita : 0;
-        db.prepare('INSERT INTO magazzino (nome, quantita, prezzo_acquisto, categoria) VALUES (?, ?, ?, ?)')
-            .run(nome, qta, prezzo_acquisto, categoria);
-        return { created: true, item: getItem(nome) };
+        const newItem = {
+            id: Date.now(),
+            nome,
+            quantita: (quantita !== null && quantita !== undefined) ? quantita : 0,
+            prezzo_acquisto,
+            categoria
+        };
+        store.magazzino.push(newItem);
+        saveData();
+        return { created: true, item: newItem };
     }
 }
 
 function eliminaItem(nome) {
-    const existing = getItem(nome);
-    if (!existing) return { success: false, reason: 'Articolo non trovato a magazzino.' };
-    db.prepare('DELETE FROM magazzino WHERE id = ?').run(existing.id);
-    return { success: true, item: existing };
+    const idx = store.magazzino.findIndex(i => i.nome.toLowerCase() === (nome || '').toLowerCase());
+    if (idx === -1) return { success: false, reason: 'Articolo non trovato a magazzino.' };
+    const removed = store.magazzino.splice(idx, 1)[0];
+    saveData();
+    return { success: true, item: removed };
 }
 
 function upsertItem(nome, quantita, prezzo_acquisto) {
     const existing = getItem(nome);
     if (existing) {
-        db.prepare('UPDATE magazzino SET quantita = quantita + ?, prezzo_acquisto = ? WHERE id = ?')
-            .run(quantita, prezzo_acquisto !== undefined ? prezzo_acquisto : existing.prezzo_acquisto, existing.id);
+        existing.quantita += quantita;
+        if (prezzo_acquisto !== undefined) existing.prezzo_acquisto = prezzo_acquisto;
     } else {
-        db.prepare('INSERT INTO magazzino (nome, quantita, prezzo_acquisto) VALUES (?, ?, ?)')
-            .run(nome, quantita, prezzo_acquisto || 0);
+        store.magazzino.push({
+            id: Date.now(),
+            nome,
+            quantita,
+            prezzo_acquisto: prezzo_acquisto || 0,
+            categoria: 'Alcol'
+        });
     }
+    saveData();
 }
 
 function prelevaItem(nome, quantita) {
@@ -157,26 +154,35 @@ function prelevaItem(nome, quantita) {
     if (item.quantita < quantita) {
         return { success: false, reason: `Scorte insufficienti! Disponibili: ${item.quantita}, richiesti: ${quantita}.` };
     }
-    db.prepare('UPDATE magazzino SET quantita = quantita - ? WHERE id = ?').run(quantita, item.id);
-    return { success: true, item: getItem(nome) };
+    item.quantita -= quantita;
+    saveData();
+    return { success: true, item };
 }
 
 function depositaItem(nome, quantita, prezzo = 0) {
     const existing = getItem(nome);
     if (existing) {
-        db.prepare('UPDATE magazzino SET quantita = quantita + ? WHERE id = ?').run(quantita, existing.id);
-        return { success: true, item: getItem(nome), created: false };
+        existing.quantita += quantita;
+        saveData();
+        return { success: true, item: existing, created: false };
     } else {
-        db.prepare('INSERT INTO magazzino (nome, quantita, prezzo_acquisto) VALUES (?, ?, ?)')
-            .run(nome, quantita, prezzo);
-        return { success: true, item: getItem(nome), created: true };
+        const newItem = {
+            id: Date.now(),
+            nome,
+            quantita,
+            prezzo_acquisto: prezzo,
+            categoria: 'Alcol'
+        };
+        store.magazzino.push(newItem);
+        saveData();
+        return { success: true, item: newItem, created: true };
     }
 }
 
 function rifornisciItem(nome, quantita) {
     const item = getItem(nome);
     if (!item) return { success: false, reason: 'Item non trovato.' };
-    const cassa = getCassa();
+    const cassa = store.cassa;
     const costoTotale = item.prezzo_acquisto * quantita;
 
     if (costoTotale > cassa.saldo_attuale) {
@@ -186,52 +192,50 @@ function rifornisciItem(nome, quantita) {
         };
     }
 
-    const tx = db.transaction(() => {
-        db.prepare('UPDATE cassa SET saldo_attuale = saldo_attuale - ?, totale_spese = totale_spese + ? WHERE id = 1')
-            .run(costoTotale, costoTotale);
-        db.prepare('UPDATE magazzino SET quantita = quantita + ? WHERE id = ?')
-            .run(quantita, item.id);
-    });
-    tx();
+    cassa.saldo_attuale -= costoTotale;
+    cassa.totale_spese += costoTotale;
+    item.quantita += quantita;
+    saveData();
 
     return {
         success: true,
         costoTotale,
-        nuovoSaldo: getCassa().saldo_attuale,
-        nuovaQuantita: getItem(nome).quantita
+        nuovoSaldo: cassa.saldo_attuale,
+        nuovaQuantita: item.quantita
     };
 }
 
 function getCassa() {
-    return db.prepare('SELECT * FROM cassa WHERE id = 1').get();
+    return { ...store.cassa };
 }
 
 function modificaFondoCassa(azione, valore) {
-    const cassa = getCassa();
+    const cassa = store.cassa;
     const vecchioSaldo = cassa.saldo_attuale;
     let nuovoSaldo = vecchioSaldo;
 
     if (azione === 'Aggiungi') {
         nuovoSaldo = vecchioSaldo + valore;
-        db.prepare('UPDATE cassa SET saldo_attuale = ?, totale_incassi = totale_incassi + ? WHERE id = 1')
-            .run(nuovoSaldo, valore);
+        cassa.saldo_attuale = nuovoSaldo;
+        cassa.totale_incassi += valore;
     } else if (azione === 'Rimuovi') {
         if (valore > vecchioSaldo) {
             return { success: false, reason: `Impossibile rimuovere €${valore}. Il saldo attuale è solo €${vecchioSaldo}.` };
         }
         nuovoSaldo = vecchioSaldo - valore;
-        db.prepare('UPDATE cassa SET saldo_attuale = ?, totale_spese = totale_spese + ? WHERE id = 1')
-            .run(nuovoSaldo, valore);
+        cassa.saldo_attuale = nuovoSaldo;
+        cassa.totale_spese += valore;
     } else if (azione === 'Imposta') {
         nuovoSaldo = valore;
-        db.prepare('UPDATE cassa SET saldo_attuale = ? WHERE id = 1').run(nuovoSaldo);
+        cassa.saldo_attuale = nuovoSaldo;
     }
 
+    saveData();
     return { success: true, vecchioSaldo, nuovoSaldo };
 }
 
 function resetSettimanale() {
-    const cassa = getCassa();
+    const cassa = store.cassa;
     const fondoIniziale = cassa.fondo_inizio_settimana;
     const saldoAttuale = cassa.saldo_attuale;
     const spese = cassa.totale_spese;
@@ -261,62 +265,61 @@ function resetSettimanale() {
     };
 
     // Reset: fondo_inizio_settimana = saldo_attuale, totale_spese = 0, totale_incassi = 0, inizio_settimana = dataOraFine
-    db.prepare(`
-        UPDATE cassa 
-        SET fondo_inizio_settimana = saldo_attuale,
-            totale_spese = 0,
-            totale_incassi = 0,
-            inizio_settimana = ?
-        WHERE id = 1
-    `).run(dataOraFine);
+    cassa.fondo_inizio_settimana = cassa.saldo_attuale;
+    cassa.totale_spese = 0;
+    cassa.totale_incassi = 0;
+    cassa.inizio_settimana = dataOraFine;
+    saveData();
 
     return report;
 }
 
 function getSettimanaConfig() {
-    return db.prepare('SELECT * FROM settimana_config WHERE id = 1').get();
+    return { ...store.settimana_config };
 }
 
 function setSettimanaConfig(giorno_fine, orario_fine, canale_id) {
-    db.prepare(`
-        UPDATE settimana_config 
-        SET giorno_fine = ?, orario_fine = ?, canale_id = ?
-        WHERE id = 1
-    `).run(giorno_fine, orario_fine, canale_id);
+    store.settimana_config.giorno_fine = giorno_fine;
+    store.settimana_config.orario_fine = orario_fine;
+    store.settimana_config.canale_id = canale_id;
+    saveData();
 }
 
 function getPannelloConfig() {
-    return db.prepare('SELECT * FROM pannello_config WHERE id = 1').get();
+    return { ...store.pannello_config };
 }
 
 function setPannelloConfig(channel_id, message_id) {
-    db.prepare(`
-        INSERT INTO pannello_config (id, channel_id, message_id)
-        VALUES (1, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET channel_id = excluded.channel_id, message_id = excluded.message_id
-    `).run(channel_id, message_id);
+    store.pannello_config.channel_id = channel_id;
+    store.pannello_config.message_id = message_id;
+    saveData();
 }
 
 function setLogCanaleFondocassa(canale_id) {
-    db.prepare(`
-        INSERT INTO log_canali (id, canale_fondocassa)
-        VALUES (1, ?)
-        ON CONFLICT(id) DO UPDATE SET canale_fondocassa = excluded.canale_fondocassa
-    `).run(canale_id);
+    store.log_canali.canale_fondocassa = canale_id;
+    saveData();
 }
 
 function getLogCanaleFondocassa() {
-    const row = db.prepare('SELECT canale_fondocassa FROM log_canali WHERE id = 1').get();
-    return row ? row.canale_fondocassa : null;
+    return store.log_canali.canale_fondocassa || null;
 }
 
 function logOperazione(user_id, tipo, dettaglio) {
-    db.prepare('INSERT INTO log_operazioni (user_id, tipo, dettaglio) VALUES (?, ?, ?)')
-        .run(user_id, tipo, dettaglio);
+    store.log_operazioni.push({
+        id: Date.now(),
+        user_id,
+        tipo,
+        dettaglio,
+        timestamp: new Date().toISOString()
+    });
+    if (store.log_operazioni.length > 500) {
+        store.log_operazioni = store.log_operazioni.slice(-500);
+    }
+    saveData();
 }
 
 module.exports = {
-    db,
+    db: null,
     getMagazzino,
     getItem,
     upsertItem,

@@ -5,11 +5,12 @@ package-lock.json
 # Variabili d'ambiente e segreti (CRITICO: non caricare mai su GitHub!)
 .env
 
-# Database SQLite locale
+# Database SQLite locale & dati runtime
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
+data/
 
 # Log e file di sistema
 *.log
