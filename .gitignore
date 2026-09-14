@@ -1,0 +1,19 @@
+# Dipendenze
+node_modules/
+package-lock.json
+
+# Variabili d'ambiente e segreti (CRITICO: non caricare mai su GitHub!)
+.env
+
+# Database SQLite locale
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Log e file di sistema
+*.log
+npm-debug.log*
+.vscode/
+.DS_Store
+Thumbs.db

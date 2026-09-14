@@ -1,0 +1,18 @@
+{
+  "name": "luxx-club-bot",
+  "version": "1.0.0",
+  "description": "Discord bot per la gestione magazzino e finanze GTA RP Luxx Club",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "Luxx Club",
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^9.4.3",
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5",
+    "node-cron": "^3.0.2",
+    "sqlite3": "^5.1.7"
+  }
+}
